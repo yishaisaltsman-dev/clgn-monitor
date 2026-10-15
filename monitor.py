@@ -14,7 +14,7 @@ SITES = [
 USE_STOCKTWITS = True
 MAX_SEND = 15
 SEEN_FILE = "seen.json"
-HEADERS = {"User-Agent": "mention-monitor/1.0 (contact: you@example.com)"}
+HEADERS = {"User-Agent": "mention-monitor/1.0 (contact: yishai.saltsman@gmail.com)"}
 
 
 def gnews(query, hl="en-US", gl="US", ceid="US:en"):
