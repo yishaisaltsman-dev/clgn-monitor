@@ -38,8 +38,7 @@ def sources():
     yield f"https://www.nasdaq.com/feed/rssoutbound?symbol={TICKER}", "rss", False
     yield f"https://seekingalpha.com/api/sa/combined/{TICKER}.xml", "rss", False
     yield f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={TICKER}&type=&dateb=&owner=include&count=20&output=atom", "rss", False
-    if USE_STOCKTWITS:
-        yield f"https://api.stocktwits.com/api/2/streams/symbol/{TICKER}.json", "stocktwits", False
+    
 
 
 def norm(title):
