@@ -4,10 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 # ---------- SETTINGS (edit this block only) ----------
 LABEL = "[CLGN]"
 TICKER = "CLGN"
-TERMS = ["collplant", "lightsolver", "light solver", "clgn", "optiphi"]
-KEYWORDS = ['"CollPlant"', '"LightSolver"', '"CollPlant" CLGN', '"$CLGN"', '"OptiPhi Computing"']
+TERMS = ["collplant", "lightsolver", "light solver", "clgn", "optiphi", "$ophi"]
+KEYWORDS = ['"CollPlant"', '"LightSolver"', '"CollPlant" CLGN', '"$CLGN"', '"OptiPhi"', '"$OPHI"']
 HEBREW_KEYWORDS = ["קולפלנט", "לייטסולבר"]
-HASHTAGS = ["CLGN", "CollPlant", "LightSolver"]
+HASHTAGS = ["CLGN", "CollPlant", "LightSolver", "OptiPhi"]
 SITE_QUERY = '(CollPlant OR LightSolver OR CLGN OR OptiPhi)'
 TRIALS_TERM = "CollPlant"
 PAPER_TERMS = ['"LightSolver"', '"CollPlant"']
