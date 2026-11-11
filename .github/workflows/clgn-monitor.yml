@@ -25,13 +25,17 @@ jobs:
       - name: Install dependencies
         run: pip install requests feedparser
 
-      - name: Check secrets
+      - name: Run monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "TOKEN is EMPTY"; else echo "TOKEN is set"; fi
-          if [ -z "$TELEGRAM_CHAT_ID" ]; then echo "CHAT_ID is EMPTY"; else echo "CHAT_ID is set"; fi
+          SEND_TEST: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python monitor.py
 
-      - name: Run monitor
-        env:
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "clgn-bot"
+          git config user.email "clgn-bot@users.noreply.github.com"
+          git add state
+          git diff --cached --quiet || (git commit -m "update state" && git pull --rebase && git push)
