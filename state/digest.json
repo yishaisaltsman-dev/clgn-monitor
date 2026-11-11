@@ -5,6 +5,14 @@
   "checked": 0,
   "instant": 0,
   "digest": 0,
-  "errors": {}
+  "errors": {
+   "Reddit [LightSolver]": 1,
+   "Reddit [LightSolver CollPlant]": 1,
+   "Reddit [CollPlant LPU]": 1,
+   "Reddit [Optiphi]": 1,
+   "Reddit [$OPHI]": 1,
+   "Reddit [OPHI stock]": 1
+  },
+  "filtered": 0
  }
 }
