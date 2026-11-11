@@ -9,7 +9,7 @@ import requests
 import feedparser
 
 # ------------------------------------------------------------------
-# SECRETS (accepts a few common names so a naming mix-up does not crash it)
+# SECRETS
 # ------------------------------------------------------------------
 BOT_TOKEN = (
     os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -31,35 +31,65 @@ if not BOT_TOKEN or not CHAT_ID:
 SEND_TEST = os.environ.get("SEND_TEST", "").lower() == "true"
 
 # ------------------------------------------------------------------
-# SETTINGS (edit these to tune how strict the screening is)
+# SETTINGS
 # ------------------------------------------------------------------
 MAX_AGE_HOURS = 72          # ignore items older than this
 MAX_INSTANT_PER_RUN = 12    # cap on instant alerts per run, overflow goes to the digest
 DIGEST_HOUR_UTC = 6         # daily digest goes out after this UTC hour
 STATE_DIR = "state"
 
-# Tier 1: unambiguous terms, always sent instantly
+# Tier 1: always sent instantly. These are the LightSolver side of the story
+# and the upcoming new name and ticker.
 TIER1_PATTERNS = [
     r"lightsolver",
     r"light solver",
-    r"collplant",
-    r"\$clgn\b",
+    r"optiphi",
+    r"\$ophi\b",
 ]
 
-# Tier 2: bare "clgn" is sent instantly only if one of these words is also present
-CLGN_BARE = re.compile(r"\bclgn\b")
-CONTEXT_WORDS = [
-    "stock", "shares", "share price", "biotech", "nasdaq", "bioink", "bio-ink",
-    "lpu", "reverse split", "ticker", "pps", "price target", "warrant",
-    "offering", "earnings", "rhcollagen", "collagen bioink", "breast implant",
-    "optical", "gpu", "photonic",
+# Phrases removed before matching so they can never trigger anything
+NOISE_PHRASES = [
+    "oxford poverty and human development",
+    "oxford poverty & human development",
+    "oxford poverty",
 ]
 
-# Anything that matches "clgn" but has no context word goes to the daily digest (tier 3)
+# Words that show a post is about the LightSolver / optical computing / name change side.
+# CollPlant, CLGN and a bare OPHI only count when one of these is also present.
+LS_CONTEXT = [
+    "lpu", "laser", "optical", "photonic", "photonics", "gpu", "optimization",
+    "optimisation", "quantum", "ai chip", "ai computing", "computing",
+    "merger", "business combination", "acquisition", "acquire", "spin off",
+    "spin-off", "name change", "rename", "renamed", "rebrand", "new name",
+    "new ticker", "ticker change", "reverse split", "pivot", "nasdaq",
+    "optiphi", "ophi",
+]
 
-REDDIT_QUERIES = ["LightSolver", "CollPlant", "CLGN stock", "$CLGN"]
-GOOGLE_NEWS_QUERIES = ["CollPlant", "LightSolver", "CollPlant LightSolver"]
-STOCKTWITS_SYMBOL = "CLGN"
+COLLPLANT_RE = re.compile(r"collplant")
+CLGN_RE = re.compile(r"\bclgn\b")
+OPHI_RE = re.compile(r"\bophi\b")
+
+# Extra context that makes a bare "ophi" count (it is a short word, so be careful)
+OPHI_CONTEXT = [
+    "stock", "shares", "share price", "ticker", "nasdaq", "lightsolver",
+    "lpu", "collplant", "clgn", "optical", "photonic", "price target",
+]
+
+# Sources. No Stocktwits on purpose.
+REDDIT_QUERIES = [
+    "LightSolver",
+    "LightSolver CollPlant",
+    "CollPlant LPU",
+    "Optiphi",
+    "$OPHI",
+    "OPHI stock",
+]
+GOOGLE_NEWS_QUERIES = [
+    "LightSolver",
+    "LightSolver CollPlant",
+    "CollPlant merger LightSolver",
+    "Optiphi",
+]
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; clgn-monitor/1.0)"}
 TIMEOUT = 25
@@ -166,53 +196,44 @@ def fetch_google_news(query):
     return items
 
 
-def fetch_stocktwits(symbol):
-    url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
-    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    if r.status_code != 200:
-        raise RuntimeError(f"Stocktwits HTTP {r.status_code}")
-    data = r.json()
-    items = []
-    for m in data.get("messages", []):
-        created = None
-        try:
-            created = datetime.strptime(
-                m["created_at"], "%Y-%m-%dT%H:%M:%SZ"
-            ).replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-        user = m.get("user", {}).get("username", "user")
-        body = m.get("body", "")
-        items.append({
-            "id": f"st:{m['id']}",
-            "source": "Stocktwits",
-            "title": f"{user}: {body[:200]}",
-            # the stream is already about the symbol, so tag it as on-topic
-            "text": body + f" ${symbol}",
-            "url": f"https://stocktwits.com/{user}/message/{m['id']}",
-            "published": created,
-        })
-    return items
-
-
 # ------------------------------------------------------------------
 # CLASSIFICATION
+# Returns:
+#   1    send instantly (clear LightSolver / Optiphi / $OPHI match)
+#   2    send instantly (CollPlant, CLGN or OPHI plus LightSolver-side context)
+#   3    daily digest (bare OPHI with no context)
+#   0    CollPlant or CLGN with no LightSolver context, treated as bio products and dropped
+#   None no match at all
 # ------------------------------------------------------------------
 def classify(text):
     t = text.lower()
+    for n in NOISE_PHRASES:
+        t = t.replace(n, " ")
+
     for p in TIER1_PATTERNS:
         if re.search(p, t):
             return 1
-    if CLGN_BARE.search(t):
-        if any(c in t for c in CONTEXT_WORDS):
+
+    has_ls_context = any(c in t for c in LS_CONTEXT)
+
+    if COLLPLANT_RE.search(t) or CLGN_RE.search(t):
+        return 2 if has_ls_context else 0
+
+    if OPHI_RE.search(t):
+        if any(c in t for c in OPHI_CONTEXT):
             return 2
         return 3
+
     return None
 
 
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
+def fresh_stats():
+    return {"checked": 0, "instant": 0, "digest": 0, "filtered": 0, "errors": {}}
+
+
 def main():
     if SEND_TEST:
         send_telegram("CLGN monitor test: the bot is connected and working.")
@@ -221,12 +242,11 @@ def main():
     digest = load_json("digest.json", {
         "items": [],
         "last_digest_date": "",
-        "stats": {"checked": 0, "instant": 0, "digest": 0, "errors": {}},
+        "stats": fresh_stats(),
     })
-    stats = digest.setdefault(
-        "stats", {"checked": 0, "instant": 0, "digest": 0, "errors": {}}
-    )
-    stats.setdefault("errors", {})
+    stats = digest.setdefault("stats", fresh_stats())
+    for k, v in fresh_stats().items():
+        stats.setdefault(k, v)
 
     now = now_utc()
     cutoff = now - timedelta(hours=MAX_AGE_HOURS)
@@ -244,7 +264,6 @@ def main():
         jobs.append((f"Reddit [{q}]", lambda q=q: fetch_reddit(q)))
     for q in GOOGLE_NEWS_QUERIES:
         jobs.append((f"News [{q}]", lambda q=q: fetch_google_news(q)))
-    jobs.append(("Stocktwits", lambda: fetch_stocktwits(STOCKTWITS_SYMBOL)))
 
     collected = {}
     for name, fn in jobs:
@@ -270,6 +289,8 @@ def main():
             instant.append(item)
         elif tier == 3:
             to_digest.append(item)
+        elif tier == 0:
+            stats["filtered"] += 1
 
     # newest first, cap instant alerts, overflow goes to the digest
     instant.sort(key=lambda i: i["published"] or now, reverse=True)
@@ -278,7 +299,7 @@ def main():
     to_digest.extend(overflow)
 
     for item in instant:
-        msg = f"[CLGN] {item['source']}\n{item['title']}\n{item['url']}"
+        msg = f"[LightSolver] {item['source']}\n{item['title']}\n{item['url']}"
         send_telegram(msg)
         stats["instant"] += 1
 
@@ -293,10 +314,12 @@ def main():
     # daily digest plus heartbeat
     today = now.strftime("%Y-%m-%d")
     if now.hour >= DIGEST_HOUR_UTC and digest.get("last_digest_date") != today:
-        lines = ["CLGN daily digest"]
+        lines = ["LightSolver monitor daily digest"]
         lines.append(
             f"Checked {stats['checked']} new items. "
-            f"Sent {stats['instant']} instantly, {stats['digest']} loose matches below."
+            f"Sent {stats['instant']} instantly, "
+            f"{stats['filtered']} CollPlant bio items filtered out, "
+            f"{stats['digest']} loose matches below."
         )
         if stats["errors"]:
             errs = ", ".join(f"{k} x{v}" for k, v in stats["errors"].items())
@@ -305,13 +328,13 @@ def main():
             lines.append("No source errors.")
         if digest["items"]:
             lines.append("")
-            lines.append("Loose matches (bare 'clgn' with no stock context):")
+            lines.append("Loose matches (bare 'ophi' with no stock context):")
             for it in digest["items"][:40]:
                 lines.append(f"- {it['source']}: {it['title']}\n  {it['url']}")
         send_telegram("\n".join(lines))
         digest["items"] = []
         digest["last_digest_date"] = today
-        digest["stats"] = {"checked": 0, "instant": 0, "digest": 0, "errors": {}}
+        digest["stats"] = fresh_stats()
 
     save_json("seen.json", seen)
     save_json("digest.json", digest)
