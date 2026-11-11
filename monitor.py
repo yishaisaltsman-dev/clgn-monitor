@@ -1,223 +1,179 @@
-import os, json, re, time, urllib.parse, requests, feedparser
-from concurrent.futures import ThreadPoolExecutor
+import os
+import re
+import json
+import time
+from datetime import datetime, timezone, timedelta
+from urllib.parse import quote_plus
 
-# ---------- SETTINGS (edit this block only) ----------
-LABEL = "[CLGN]"
-TICKER = "CLGN"
-TERMS = ["collplant", "lightsolver", "light solver", "clgn", "optiphi", "$ophi"]
-KEYWORDS = ['"CollPlant"', '"LightSolver"', '"CollPlant" CLGN', '"$CLGN"', '"OptiPhi"', '"$OPHI"']
-HEBREW_KEYWORDS = ["קולפלנט", "לייטסולבר"]
-HASHTAGS = ["CLGN", "CollPlant", "LightSolver", "OptiPhi"]
-SITE_QUERY = '(CollPlant OR LightSolver OR CLGN OR OptiPhi)'
-TRIALS_TERM = "CollPlant"
-PAPER_TERMS = ['"LightSolver"', '"CollPlant"']
-SITES = [
-    "globenewswire.com", "prnewswire.com", "businesswire.com", "accessnewswire.com",
-    "seekingalpha.com", "benzinga.com", "investing.com", "stocktitan.net",
-    "tipranks.com", "marketbeat.com", "fiercebiotech.com", "biospace.com",
-    "photonicsonline.com", "hpcwire.com", "globes.co.il",
-    "calcalistech.com", "timesofisrael.com", "jpost.com",
-]
-NITTER_HOSTS = []
-MASTODON = ["mastodon.social", "mastodon.online"]
-EXTRA_FEEDS = []
-MAX_SEND = 15
-SEEN_FILE = "seen.json"
-# ---------- END SETTINGS ----------
+import requests
+import feedparser
 
-# ---------- RELEVANCE FILTER ----------
-# Anything containing one of these phrases is dropped. Add noisy phrases here.
-EXCLUDE = [
-]
+# ------------------------------------------------------------------
+# SETTINGS (edit these to tune how strict the screening is)
+# ------------------------------------------------------------------
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# These clearly mean your company, so they always pass.
-STRONG = [
-    r"\$CLGN\b",
-    r"\$OPHI\b",
+MAX_AGE_HOURS = 72          # ignore items older than this
+MAX_INSTANT_PER_RUN = 12    # cap on instant alerts per run, overflow goes to the digest
+DIGEST_HOUR_UTC = 6         # daily digest goes out after this UTC hour (6 = 8am Israel in winter)
+STATE_DIR = "state"
+
+# Tier 1: unambiguous terms, always sent instantly
+TIER1_PATTERNS = [
+    r"lightsolver",
+    r"light solver",
     r"collplant",
-    r"light[\s\-]*solver",
-    r"optiphi",
-    r"laser\s+processing\s+unit",
-    r"קולפלנט",
-    r"לייטסולבר",
+    r"\$clgn\b",
 ]
 
-# A bare uppercase "CLGN" only passes if one of these words is also present.
-CONTEXT_RE = re.compile(
-    r"\b(nasdaq|stocks?|shares|rhcollagen|bioprint\w*|abbvie|photonic|laser|"
-    r"reverse split|biotech|regenerative|dermal fillers?|breast implants?)\b",
-    re.I,
-)
+# Tier 2: bare "clgn" is sent instantly only if one of these words is also present
+CLGN_BARE = re.compile(r"\bclgn\b")
+CONTEXT_WORDS = [
+    "stock", "shares", "share price", "biotech", "nasdaq", "bioink", "bio-ink",
+    "lpu", "reverse split", "ticker", "pps", "price target", "warrant",
+    "offering", "earnings", "rhcollagen", "collagen bioink", "breast implant",
+    "optical", "gpu", "photonic",
+]
 
-# Sources that are already specific to your company and skip the filter.
-TRUSTED_KINDS = {"trials", "papers"}
+# Anything that matches "clgn" but has no context word goes to the daily digest (tier 3)
 
+REDDIT_QUERIES = ["LightSolver", "CollPlant", "CLGN stock", "$CLGN"]
+GOOGLE_NEWS_QUERIES = ["CollPlant", "LightSolver", "CollPlant LightSolver"]
+STOCKTWITS_SYMBOL = "CLGN"
 
-def is_relevant(text):
-    low = text.lower()
-    if any(x.lower() in low for x in EXCLUDE):
-        return False
-    if any(re.search(p, text, re.I) for p in STRONG):
-        return True
-    if re.search(r"\bCLGN\b", text) and CONTEXT_RE.search(text):
-        return True
-    return False
-# ---------- END RELEVANCE FILTER ----------
-
-HEADERS = {"User-Agent": "mention-monitor/1.0 (contact: yishai.saltsman@gmail.com)"}
-
-EDITIONS_MAIN = [("en-US", "US", "US:en"), ("en-IL", "IL", "IL:en")]
-EDITIONS_EXTRA = [("en-GB", "GB", "GB:en"), ("en-CA", "CA", "CA:en"), ("en-AU", "AU", "AU:en")]
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; clgn-monitor/1.0)"}
+TIMEOUT = 25
 
 
-def gnews(query, hl="en-US", gl="US", ceid="US:en"):
-    q = urllib.parse.quote(query)
-    return f"https://news.google.com/rss/search?q={q}+when:2d&hl={hl}&gl={gl}&ceid={ceid}"
+# ------------------------------------------------------------------
+# STATE HELPERS
+# ------------------------------------------------------------------
+def load_json(name, default):
+    path = os.path.join(STATE_DIR, name)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
 
 
-def sources():
-    for i, k in enumerate(KEYWORDS):
-        q = urllib.parse.quote(k)
-        editions = EDITIONS_MAIN + (EDITIONS_EXTRA if i < 2 else [])
-        for hl, gl, ceid in editions:
-            yield gnews(k, hl, gl, ceid), "rss", False
-        yield f"https://www.bing.com/news/search?q={q}&format=rss", "rss", True
-        yield f"https://news.search.yahoo.com/rss?p={q}", "rss", True
-        yield f"https://www.reddit.com/search.rss?q={q}&sort=new", "rss", True
-        yield f"https://hnrss.org/newest?q={q}", "rss", True
-        yield f"https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?q={q}&sort=latest&limit=25", "bluesky", True
-        for h in NITTER_HOSTS:
-            yield f"https://{h}/search/rss?f=tweets&q={q}", "rss", True
-    for k in HEBREW_KEYWORDS:
-        yield gnews(k, "he", "IL", "IL:he"), "rss", False
-    for tag in HASHTAGS:
-        for inst in MASTODON:
-            yield f"https://{inst}/tags/{tag}.rss", "rss", True
-    for s in SITES:
-        yield gnews(f"{SITE_QUERY} site:{s}"), "rss", False
-    yield f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={TICKER}&region=US&lang=en-US", "rss", False
-    yield f"https://www.nasdaq.com/feed/rssoutbound?symbol={TICKER}", "rss", False
-    yield f"https://seekingalpha.com/api/sa/combined/{TICKER}.xml", "rss", False
-    yield f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={TICKER}&type=&dateb=&owner=include&count=20&output=atom", "rss", False
-    yield f"https://clinicaltrials.gov/api/v2/studies?query.term={urllib.parse.quote(TRIALS_TERM)}&pageSize=20&sort=LastUpdatePostDate:desc", "trials", False
-    for t in PAPER_TERMS:
-        yield f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={urllib.parse.quote(t + ' sort_date:y')}&format=json&pageSize=20", "papers", False
-    for u in EXTRA_FEEDS:
-        yield u, "rss", False
+def save_json(name, data):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, name), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
 
 
-def norm(title):
-    t = re.sub(r"\s+-\s+[^-]+$", "", title.lower())
-    t = re.sub(r"[^\w]+", " ", t).strip()
-    return t[:90]
+def now_utc():
+    return datetime.now(timezone.utc)
 
 
-def send(text):
-    ok_any = False
-    for chat in os.environ["TG_CHAT"].split(","):
-        chat = chat.strip()
-        if not chat:
-            continue
+def struct_to_dt(t):
+    if not t:
+        return None
+    return datetime(*t[:6], tzinfo=timezone.utc)
+
+
+# ------------------------------------------------------------------
+# TELEGRAM
+# ------------------------------------------------------------------
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)] or [""]
+    for chunk in chunks:
         try:
             r = requests.post(
-                f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage",
-                data={"chat_id": chat, "text": text[:3500]},
-                timeout=20,
+                url,
+                data={
+                    "chat_id": CHAT_ID,
+                    "text": chunk,
+                    "disable_web_page_preview": "true",
+                },
+                timeout=TIMEOUT,
             )
-            if not r.ok:
-                print("telegram error:", chat, r.status_code, r.text[:200])
-            ok_any = ok_any or r.ok
-        except Exception as ex:
-            print("telegram failed:", ex)
-    return ok_any
-
-
-def parse_bluesky(r):
-    out = []
-    for p in r.json().get("posts", []):
-        handle = p.get("author", {}).get("handle", "")
-        text = (p.get("record", {}).get("text") or "").replace("\n", " ")
-        rkey = p.get("uri", "").split("/")[-1]
-        out.append((f"Bluesky {handle}: {text[:200]}", f"https://bsky.app/profile/{handle}/post/{rkey}", text))
-    return out
-
-
-def parse_trials(r):
-    out = []
-    for s in r.json().get("studies", []):
-        idm = s.get("protocolSection", {}).get("identificationModule", {})
-        nct = idm.get("nctId")
-        if nct:
-            out.append((f"ClinicalTrials.gov: {idm.get('briefTitle', '')}", f"https://clinicaltrials.gov/study/{nct}", ""))
-    return out
-
-
-def parse_papers(r):
-    out = []
-    for a in r.json().get("resultList", {}).get("result", []):
-        if a.get("id") and a.get("source"):
-            out.append((f"Research: {a.get('title', '')}", f"https://europepmc.org/article/{a['source']}/{a['id']}", ""))
-    return out
-
-
-PARSERS = {"bluesky": parse_bluesky, "trials": parse_trials, "papers": parse_papers}
-
-
-def fetch(src):
-    url, kind, need_match = src
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        if kind in PARSERS:
-            entries = PARSERS[kind](r)
-        else:
-            feed = feedparser.parse(r.content)
-            entries = [(e.get("title", ""), e.get("link", ""), e.get("summary", "")) for e in feed.entries]
-        print(r.status_code, len(entries), url[:110])
-        return need_match, kind, entries
-    except Exception as ex:
-        print("failed:", url[:110], str(ex)[:80])
-        return need_match, kind, []
-
-
-first_run = not os.path.exists(SEEN_FILE)
-try:
-    seen = set(json.load(open(SEEN_FILE))) if not first_run else set()
-except Exception:
-    seen = set()
-
-found = []
-batch = set()
-filtered_out = 0
-
-with ThreadPoolExecutor(max_workers=16) as pool:
-    results = list(pool.map(fetch, list(sources())))
-
-for need_match, kind, entries in results:
-    for title, link, summary in entries:
-        if not link:
-            continue
-        link = re.sub(r"^https?://[^/]*nitter[^/]*/", "https://x.com/", link).replace("#m", "")
-        if need_match and not any(t in (title + " " + summary).lower() for t in TERMS):
-            continue
-        if kind not in TRUSTED_KINDS and not is_relevant(title + " " + summary):
-            filtered_out += 1
-            continue
-        n = norm(title)
-        tkey = "t:" + n if n else link
-        if link in seen or tkey in seen or link in batch or tkey in batch:
-            continue
-        batch.update([link, tkey])
-        found.append((link, tkey, f"{LABEL} {title}\n{link}"))
-
-if first_run:
-    for link, tkey, _ in found:
-        seen.update([link, tkey])
-else:
-    for link, tkey, text in found[:MAX_SEND]:
-        if send(text):
-            seen.update([link, tkey])
+            if r.status_code != 200:
+                print("Telegram error:", r.status_code, r.text[:200])
+        except Exception as e:
+            print("Telegram exception:", e)
         time.sleep(1)
 
-print("filtered as irrelevant:", filtered_out)
-print("new items found:", len(found))
-json.dump(sorted(seen), open(SEEN_FILE, "w"))
+
+# ------------------------------------------------------------------
+# SOURCES
+# Each fetcher returns a list of dicts:
+# {id, source, title, text, url, published}
+# ------------------------------------------------------------------
+def fetch_reddit(query):
+    url = f"https://www.reddit.com/search.rss?q={quote_plus(query)}&sort=new&t=week"
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"Reddit HTTP {r.status_code}")
+    feed = feedparser.parse(r.content)
+    items = []
+    for e in feed.entries:
+        items.append({
+            "id": "reddit:" + (e.get("id") or e.get("link", "")),
+            "source": "Reddit",
+            "title": e.get("title", ""),
+            "text": (e.get("title", "") + " " + e.get("summary", "")),
+            "url": e.get("link", ""),
+            "published": struct_to_dt(e.get("updated_parsed") or e.get("published_parsed")),
+        })
+    return items
+
+
+def fetch_google_news(query):
+    url = (
+        "https://news.google.com/rss/search?q="
+        + quote_plus(query)
+        + "&hl=en-US&gl=US&ceid=US:en"
+    )
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"Google News HTTP {r.status_code}")
+    feed = feedparser.parse(r.content)
+    items = []
+    for e in feed.entries:
+        items.append({
+            "id": "gnews:" + (e.get("id") or e.get("link", "")),
+            "source": "News",
+            "title": e.get("title", ""),
+            "text": (e.get("title", "") + " " + e.get("summary", "")),
+            "url": e.get("link", ""),
+            "published": struct_to_dt(e.get("published_parsed")),
+        })
+    return items
+
+
+def fetch_stocktwits(symbol):
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"Stocktwits HTTP {r.status_code}")
+    data = r.json()
+    items = []
+    for m in data.get("messages", []):
+        created = None
+        try:
+            created = datetime.strptime(
+                m["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+        user = m.get("user", {}).get("username", "user")
+        body = m.get("body", "")
+        items.append({
+            "id": f"st:{m['id']}",
+            "source": "Stocktwits",
+            "title": f"{user}: {body[:200]}",
+            # the stream is already about the symbol, so tag it as on-topic
+            "text": body + f" ${symbol}",
+            "url": f"https://stocktwits.com/{user}/message/{m['id']}",
+            "published": created,
+        })
+    return items
+
+
+#
