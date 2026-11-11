@@ -11,8 +11,10 @@ import feedparser
 # ------------------------------------------------------------------
 # SETTINGS (edit these to tune how strict the screening is)
 # ------------------------------------------------------------------
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN") or os.environ.get("TG_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("CHAT_ID") or os.environ.get("TG_CHAT_ID")
+if not BOT_TOKEN or not CHAT_ID:
+    raise SystemExit("Missing Telegram token or chat id. Check the secret names in the workflow env block.")
 
 MAX_AGE_HOURS = 72          # ignore items older than this
 MAX_INSTANT_PER_RUN = 12    # cap on instant alerts per run, overflow goes to the digest
