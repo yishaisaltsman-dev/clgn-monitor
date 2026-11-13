@@ -1,18 +1,11 @@
 {
  "items": [],
- "last_digest_date": "2026-11-12",
+ "last_digest_date": "2026-11-13",
  "stats": {
-  "checked": 3,
-  "instant": 3,
+  "checked": 0,
+  "instant": 0,
   "digest": 0,
   "filtered": 0,
-  "errors": {
-   "Reddit [LightSolver]": 3,
-   "Reddit [LightSolver CollPlant]": 3,
-   "Reddit [CollPlant LPU]": 3,
-   "Reddit [Optiphi]": 3,
-   "Reddit [$OPHI]": 3,
-   "Reddit [OPHI stock]": 3
-  }
+  "errors": {}
  }
 }
