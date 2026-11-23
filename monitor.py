@@ -38,7 +38,7 @@ KEEP_ICASE = re.compile(
 KEEP_CASE = re.compile(r"\bOPHI\b")
 
 
-def relevant(text: str) -> bool:
+def relevant(text):
     return bool(KEEP_ICASE.search(text) or KEEP_CASE.search(text))
 
 
@@ -125,3 +125,116 @@ def gdelt():
     try:
         data = r.json()
     except Exception:
+        return out
+    for a in data.get("articles", []):
+        title = a.get("title") or ""
+        when = None
+        try:
+            when = datetime.strptime(a["seendate"], "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc)
+        except Exception:
+            pass
+        out.append({"title": title, "link": a.get("url", ""), "text": title,
+                    "when": when, "source": "GDELT"})
+    return out
+
+
+def yahoo_ticker(symbol):
+    url = ("https://feeds.finance.yahoo.com/rss/2.0/headline?s="
+           f"{symbol}&region=US&lang=en-US")
+    r = get(url)
+    return parse_rss(r.text, "Yahoo Finance") if r else []
+
+
+def key_for(item):
+    norm = re.sub(r"[^a-z0-9]", "", item["title"].lower())[:90]
+    return hashlib.sha1(norm.encode()).hexdigest()
+
+
+def load_seen():
+    try:
+        with open(SEEN_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if isinstance(data, list):
+        now = time.time()
+        return {str(k): now for k in data}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def save_seen(seen):
+    cutoff = time.time() - 30 * 86400
+    seen = {k: v for k, v in seen.items() if v > cutoff}
+    with open(SEEN_FILE, "w") as f:
+        json.dump(seen, f)
+
+
+def send(item):
+    text = f"{item['title']}\n{item['source']}\n{item['link']}"
+    r = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": text},
+        timeout=25,
+    )
+    if r.status_code == 429:
+        time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)))
+        return send(item)
+    return r.ok
+
+
+def main():
+    first_run = not os.path.exists(SEEN_FILE)
+    seen = load_seen()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
+
+    found = []
+    for q in QUERIES:
+        found += google_news(q)
+        found += bing_news(q)
+        found += hacker_news(q)
+    found += gdelt()
+    for sym in ["CLGN", "OPHI"]:
+        found += yahoo_ticker(sym)
+
+    new = []
+    batch_keys = set()
+    for it in found:
+        if not it["title"] or not it["link"]:
+            continue
+        if not relevant(it["text"]):
+            continue
+        if it["when"] and it["when"] < cutoff:
+            continue
+        k = key_for(it)
+        if k in seen or k in batch_keys:
+            continue
+        batch_keys.add(k)
+        new.append(it)
+
+    new.sort(key=lambda i: i["when"] or datetime.now(timezone.utc))
+    print(f"fetched {len(found)}, new relevant {len(new)}")
+
+    if first_run:
+        for it in new:
+            seen[key_for(it)] = time.time()
+        save_seen(seen)
+        print("first run: seeded, nothing sent")
+        return
+
+    sent = 0
+    for it in new:
+        if sent >= MAX_ALERTS_PER_RUN:
+            break
+        if send(it):
+            seen[key_for(it)] = time.time()
+            sent += 1
+            time.sleep(1.2)
+    save_seen(seen)
+    print(f"sent {sent}")
+
+
+if __name__ == "__main__":
+    main()
