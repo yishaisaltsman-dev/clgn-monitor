@@ -1,4 +1,4 @@
-name: CLGN monitor
+name: clgn-monitor
 
 on:
   schedule:
@@ -15,6 +15,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -22,20 +23,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install requests feedparser
+      - run: pip install requests
 
-      - name: Run monitor
+      - run: python monitor.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SEND_TEST: ${{ github.event_name == 'workflow_dispatch' }}
-        run: python monitor.py
 
-      - name: Save state
-        if: always()
+      - name: Save seen list
         run: |
-          git config user.name "clgn-bot"
-          git config user.email "clgn-bot@users.noreply.github.com"
-          git add state
-          git diff --cached --quiet || (git commit -m "update state" && git pull --rebase && git push)
+          git config user.name "monitor-bot"
+          git config user.email "monitor-bot@users.noreply.github.com"
+          git add seen.json
+          git diff --staged --quiet || (git commit -m "update seen" && git push)
